@@ -45,10 +45,8 @@ func (client *KwProxyClient) Start() {
 	// 读取配置
 	client.readConfig()
 
-	return
-
 	// 起主连接
-	conn, err := net.Dial("tcp", "localhost:8888")
+	conn, err := net.Dial("tcp", client.config.MainConnServer)
 
 	if nil != err {
 		log.Println("not connection ")
@@ -56,7 +54,7 @@ func (client *KwProxyClient) Start() {
 	}
 
 	// 握手
-	domains := make([]string, len(client.config.Domains))
+	domains := make([]string, 0)
 	for _, v := range client.config.Domains {
 		domains = append(domains, v.Remote)
 	}
@@ -106,7 +104,7 @@ func (client *KwProxyClient) handlerMainMsg(msgType uint16, data []byte, conn ne
 
 		// 起一个传输连接
 
-		transConn, err := net.Dial("tcp", "localhost:9999")
+		transConn, err := net.Dial("tcp", client.config.TransConnServer)
 
 		if nil != err {
 			log.Println("not connection ")
@@ -131,33 +129,19 @@ func (client *KwProxyClient) handlerMainMsg(msgType uint16, data []byte, conn ne
 
 		transConn.Write(cnt)
 
-		go client.handleReadLeftToRight(transConn, localConn)
-		go client.handleReadLeftToRight(localConn, transConn)
-
-	}
-}
-
-// 从左边的连接读取数据，写到右边
-func (client *KwProxyClient) handleReadLeftToRight(transConn, localConn net.Conn) {
-	for {
-		buf := make([]byte, 2048)
-		leng, err := transConn.Read(buf)
-
-		if err != nil {
-			log.Println("read error, ", err)
-
-		}
-
-		_, err = localConn.Write(buf[0:leng])
-
-		if err != nil {
-			log.Println("read error, ", err)
-
-		}
+		go common.ReadLeftToRight(transConn, localConn)
+		go common.ReadLeftToRight(localConn, transConn)
 
 	}
 }
 
 func (client *KwProxyClient) getLocalAddr(remoteAddr string) string {
+
+	for _, v := range client.config.Domains {
+		if v.Remote == remoteAddr {
+			return v.Local
+		}
+	}
+
 	return ""
 }

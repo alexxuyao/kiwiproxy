@@ -1,0 +1,5 @@
+{
+	"mainConnServer" : ":8888",
+	"proxyConnServer" : ":7777",
+	"transConnServer" : ":9999"
+}

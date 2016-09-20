@@ -20,9 +20,18 @@ type DomainPair struct {
 
 // 客户端配置
 type ClientConfig struct {
-	Username string       `json:"username"` // 用户名
-	Password string       `json:"password"` // 密码
-	Domains  []DomainPair `json:"domains"`  // 绑定的域名
+	Username        string       `json:"username"`        // 用户名
+	Password        string       `json:"password"`        // 密码
+	MainConnServer  string       `json:"mainConnServer"`  // 主连接服务器
+	TransConnServer string       `json:"transConnServer"` // 传输连接服务器
+	Domains         []DomainPair `json:"domains"`         // 绑定的域名
+}
+
+// 服务端配置
+type ServerConfig struct {
+	MainConnServer  string `json:"mainConnServer"`  // 主连接服务器
+	ProxyConnServer string `json:"proxyConnServer"` // http监听端口
+	TransConnServer string `json:"transConnServer"` // 传输连接服务器
 }
 
 // 客户端发起握手
@@ -34,8 +43,8 @@ type HandShakeMsg struct {
 
 // 服务端让客户端建立传输连接
 type CreateTransConnMsg struct {
-	MsgId  uint32 // 代理作业的唯一ID
-	Domain string // 传输的domain
+	MsgId  uint32 `json:"msgId"`  // 代理作业的唯一ID
+	Domain string `json:"domain"` // 传输的domain
 }
 
 // 包装消息
@@ -115,4 +124,30 @@ func ReadMsg(conn net.Conn) (uint32, uint16, []byte, error) {
 	log.Println(string(data[2:]))
 
 	return datalen, binary.BigEndian.Uint16(data[0:2]), data[2:], nil
+}
+
+// 从左边的连接读取数据，写到右边
+func ReadLeftToRight(leftConn, rightConn net.Conn) {
+	for {
+
+		log.Println("read left conn ,local:", leftConn.LocalAddr(), ", remote:", leftConn.RemoteAddr())
+
+		buf := make([]byte, 1024)
+		leng, err := leftConn.Read(buf)
+
+		if err != nil {
+			log.Println("read left conn error, ", err, ",local:", leftConn.LocalAddr(), ", remote:", leftConn.RemoteAddr())
+			break
+		}
+
+		log.Println("read content from left,", string(buf[0:leng]))
+
+		_, err = rightConn.Write(buf[0:leng])
+
+		if err != nil {
+			log.Println("write right conn error, ", err, ",local:", rightConn.LocalAddr(), ", remote:", rightConn.RemoteAddr())
+			break
+		}
+
+	}
 }

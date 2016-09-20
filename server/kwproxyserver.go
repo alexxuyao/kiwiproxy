@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"log"
 	"net"
 	"strconv"
@@ -21,8 +22,8 @@ func main() {
 type ProxyApp struct {
 	domainMap     cmap.ConcurrentMap // 域名与用户名的关系 map[domain]username
 	mainConnMap   cmap.ConcurrentMap // 用户名与主连接的关系 map[username]net.Conn
-	handlShakeMap cmap.ConcurrentMap // 用户名与HandShake的关系 map[username]common.HandShakeMsg
-	proxyworkMap  cmap.ConcurrentMap // 消息ID与proxywork的关系 map[msgId]ProxyWork
+	handlShakeMap cmap.ConcurrentMap // 用户名与HandShake的关系 map[username]*common.HandShakeMsg
+	proxyworkMap  cmap.ConcurrentMap // 消息ID与proxywork的关系 map[msgId]*ProxyWork
 	genIdLock     sync.Mutex         // 生成消息ID时会使用的锁
 	msgId         uint32             // 消息ID
 }
@@ -85,7 +86,7 @@ func (app *ProxyApp) handlerProxyConn(conn net.Conn) {
 	//Cookie: _ga=GA1.3.809376144.1441551016; NID=80=bZizxYb5VsCvLQMZwXS-CX7qRSVTdNKOfTk9C3WDMBSzEXqsvrS4KLNxYETmJtJIM9a_8uDi2xQ5nceuLzdQIEoZY7B5pZZorcbGrtFmkhz-k8OYLcX4lRNSilQHVafc
 	//Connection: close
 
-	log.Println("handlerProxyConn accept conn")
+	log.Println("handlerProxyConn accept conn", conn)
 
 	ch := make(chan ProxyMsg)
 	go app.transProxy(ch, conn)
@@ -105,21 +106,14 @@ func (app *ProxyApp) transProxy(ch chan ProxyMsg, proxyConn net.Conn) {
 	init := false
 	id := app.genMsgId()
 	tch := make(chan uint32)
-	proxywork := ProxyWork{Id: id, Chan4TransConn: tch, ProxyConn: proxyConn}
+	proxywork := &ProxyWork{Id: id, Chan4TransConn: tch, ProxyConn: proxyConn}
 	app.proxyworkMap.Set(strconv.FormatUint(uint64(id), 10), proxywork)
 
 	for {
 		msg := <-ch
 
 		if msg.Err != nil {
-
-			// 连接关闭
-			proxywork.ProxyConn.Close()
-			proxywork.TransConn.Close()
-			app.proxyworkMap.Remove(strconv.FormatUint(uint64(id), 10))
-
-			log.Println("transProxy, conn close", id)
-
+			log.Println("get error:", msg.Err)
 			break
 		}
 
@@ -133,22 +127,52 @@ func (app *ProxyApp) transProxy(ch chan ProxyMsg, proxyConn net.Conn) {
 			log.Println("get request domain in transProxy, ", domain)
 
 			//找到域名对应的mainConn, 让客户端发一个请求上来
-			app.notifyClient(domain, id)
+			err := app.notifyClient(domain, id)
+
+			if err != nil {
+				break
+			}
 
 			// 等待客户端的请求，转发数据
 			cMsgId := <-proxywork.Chan4TransConn
 
+			go common.ReadLeftToRight(proxywork.TransConn, proxywork.ProxyConn)
+
 			log.Println("transProxy, init finish, client MsgId", cMsgId)
 
 			init = true
+
 		}
 
-		proxywork.TransConn.Write(msg.Data)
-		log.Println("transProxy, conn write", id)
+		log.Println("write conn ,local:", proxywork.TransConn.LocalAddr(), ", remote:", proxywork.TransConn.RemoteAddr())
+
+		wlen, err := proxywork.TransConn.Write(msg.Data)
+
+		if nil != err {
+			log.Println("write to trans conn error:", err)
+		}
+
+		log.Println("transProxy, conn write,len : ", wlen, ", msgId:", id, ", msg:", string(msg.Data))
 	}
+
+	app.releaseProxyWork(proxywork)
 }
 
-func (app *ProxyApp) notifyClient(domain string, id uint32) {
+func (app *ProxyApp) releaseProxyWork(proxywork *ProxyWork) {
+
+	// 连接关闭
+	proxywork.ProxyConn.Close()
+
+	if nil != proxywork.TransConn {
+		proxywork.TransConn.Close()
+	}
+
+	app.proxyworkMap.Remove(strconv.FormatUint(uint64(proxywork.Id), 10))
+
+	log.Println("transProxy, conn close, msgId:", proxywork.Id)
+}
+
+func (app *ProxyApp) notifyClient(domain string, id uint32) error {
 
 	if tmp, ok := app.domainMap.Get(domain); ok {
 		username := tmp.(string)
@@ -159,10 +183,9 @@ func (app *ProxyApp) notifyClient(domain string, id uint32) {
 			createMsg := common.CreateTransConnMsg{MsgId: id, Domain: domain}
 			ret, err := common.PacketMsg(createMsg, common.MSG_TYPE_CREATE_TRANS_CONN)
 
-			if nil != err {
-				log.Println("PacketMsg error:", err)
-			} else {
+			if nil == err {
 				conn.Write(ret)
+				return nil
 			}
 
 		} else {
@@ -172,6 +195,8 @@ func (app *ProxyApp) notifyClient(domain string, id uint32) {
 	} else {
 		log.Println("can not found username for domain, ", domain)
 	}
+
+	return errors.New("find client error for " + domain + ", msgId:" + strconv.FormatUint(uint64(id), 10))
 
 }
 
@@ -219,47 +244,66 @@ func (app *ProxyApp) serverMainConn() {
 func (app *ProxyApp) handlerMainConn(conn net.Conn) {
 	defer conn.Close()
 
+	var handshake *common.HandShakeMsg
+
 	for {
 
 		_, msgType, data, err := common.ReadMsg(conn)
 
 		if nil != err {
 			log.Println("read msg error,", err)
+			break
+		}
+
+		if common.MSG_TYPE_HAND_SHAKE == msgType {
+			handshake = app.handlerHandShakeMsg(msgType, data, conn)
 		} else {
 			go app.handlerMainMsg(msgType, data, conn)
 		}
 
 	}
 
-	// TODO 释放资源
-	log.Println("release resource.")
+	app.releaseResource(handshake)
+}
+
+// 客户端断开连接开，释放资源
+func (app *ProxyApp) releaseResource(handshake *common.HandShakeMsg) {
+	log.Println("release resource for ,", handshake.Username)
+
+	// TODO 释放资源, 那几个map
+
 }
 
 // 处理消息
 func (app *ProxyApp) handlerMainMsg(msgType uint16, data []byte, conn net.Conn) {
 
-	if common.MSG_TYPE_HAND_SHAKE == msgType {
-		handshake := common.HandShakeMsg{}
-		err := json.Unmarshal(data, &handshake)
-		if nil != err {
-			log.Println("unmarshal error,", err)
-		}
+}
 
-		// 首次连接时，校验用户名密码
+// 处理消息
+func (app *ProxyApp) handlerHandShakeMsg(msgType uint16, data []byte, conn net.Conn) *common.HandShakeMsg {
 
-		// 得到请求域名和用户名的对应关系
-		for _, v := range handshake.Domains {
-			app.domainMap.Set(v, handshake.Username)
-		}
-
-		// 绑定用户名与Conn的关系
-		app.mainConnMap.Set(handshake.Username, conn)
-
-		// 绑定用户名与HandShakeMsg的关系
-		app.handlShakeMap.Set(handshake.Username, handshake)
-
-		log.Println("do handshake finish, username", handshake.Username, ", domains:", handshake.Domains)
+	handshake := common.HandShakeMsg{}
+	err := json.Unmarshal(data, &handshake)
+	if nil != err {
+		log.Println("unmarshal error,", err)
 	}
+
+	// 首次连接时，校验用户名密码
+
+	// 得到请求域名和用户名的对应关系
+	for _, v := range handshake.Domains {
+		app.domainMap.Set(v, handshake.Username)
+	}
+
+	// 绑定用户名与Conn的关系
+	app.mainConnMap.Set(handshake.Username, conn)
+
+	// 绑定用户名与HandShakeMsg的关系
+	app.handlShakeMap.Set(handshake.Username, &handshake)
+
+	log.Println("do handshake finish, username", handshake.Username, ", domains:", handshake.Domains)
+
+	return &handshake
 }
 
 // 监听数据传输端口
@@ -283,11 +327,11 @@ func (app *ProxyApp) handlerTransConn(conn net.Conn) {
 			}
 
 			if tmp, ok := app.proxyworkMap.Get(strconv.FormatUint(uint64(msg.MsgId), 10)); ok {
-				proxywork := tmp.(ProxyWork)
+				proxywork := tmp.(*ProxyWork)
 				proxywork.TransConn = conn
 				proxywork.Chan4TransConn <- msg.MsgId
 
-				log.Println("attach proxywork trans conn, msgId:", msg.MsgId)
+				log.Println("attach proxywork trans conn, msgId:", msg.MsgId, ", transConn is :", proxywork.TransConn)
 			}
 		}
 	}

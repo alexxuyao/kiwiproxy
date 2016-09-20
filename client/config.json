@@ -1,10 +1,12 @@
 {
     "username":"alex",
     "password":"xxxxx",
+	"mainConnServer" : "121.40.64.190:8888",
+	"transConnServer" : "121.40.64.190:9999",
     "domains":[
         {
-            "remote":"www.baidu.com",
-            "local":"127.0.0.1:8080"
+            "remote":"121.40.64.190",
+            "local":"127.0.0.1:81"
         }
     ]
 }
