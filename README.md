@@ -3,7 +3,7 @@
 
 # 使用方法
 
-1.server 端，编译部署在外网服务器
+1. server 端，编译部署在外网服务器
 <code>修改配置文件 server/config.json</code>
  <pre>
 {
@@ -14,7 +14,7 @@
  </pre>
 <code>./server </code>
 
-2.client 端,编译部署在内网
+2. client 端,编译部署在内网
 <code>修改 client/config.json</code>
  <pre>
 {
