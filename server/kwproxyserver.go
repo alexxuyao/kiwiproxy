@@ -3,8 +3,10 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"io/ioutil"
 	"log"
 	"net"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -26,6 +28,7 @@ type ProxyApp struct {
 	proxyworkMap  cmap.ConcurrentMap // 消息ID与proxywork的关系 map[msgId]*ProxyWork
 	genIdLock     sync.Mutex         // 生成消息ID时会使用的锁
 	msgId         uint32             // 消息ID
+	config        common.ServerConfig
 }
 
 // 开始监听
@@ -36,6 +39,9 @@ func (app *ProxyApp) Start() {
 	app.handlShakeMap = cmap.New()
 	app.proxyworkMap = cmap.New()
 
+	// 读取配置
+	app.readConfig()
+
 	// 启动监听
 	go app.serverProxyConn()
 
@@ -44,6 +50,25 @@ func (app *ProxyApp) Start() {
 
 	// 启动监听主连接
 	app.serverMainConn()
+}
+
+// 读取配置
+func (app *ProxyApp) readConfig() {
+
+	filepath := "./config.json"
+	r, err := os.Open(filepath)
+	defer r.Close()
+
+	if nil != err {
+		log.Println("open config file error,", err)
+		return
+	}
+
+	bs, _ := ioutil.ReadAll(r)
+	json.Unmarshal(bs, &app.config)
+
+	ret, _ := json.Marshal(app.config)
+	log.Println(string(ret))
 }
 
 // 监听某一个端口
@@ -69,7 +94,7 @@ func listenServer(addr string, handler func(net.Conn)) {
 
 //
 func (app *ProxyApp) serverProxyConn() {
-	listenServer(":7777", app.handlerProxyConn)
+	listenServer(app.config.ProxyConnServer, app.handlerProxyConn)
 }
 
 func (app *ProxyApp) handlerProxyConn(conn net.Conn) {
@@ -238,7 +263,7 @@ func (app *ProxyApp) genMsgId() uint32 {
 
 // 监听主线程
 func (app *ProxyApp) serverMainConn() {
-	listenServer(":8888", app.handlerMainConn)
+	listenServer(app.config.MainConnServer, app.handlerMainConn)
 }
 
 func (app *ProxyApp) handlerMainConn(conn net.Conn) {
@@ -308,7 +333,7 @@ func (app *ProxyApp) handlerHandShakeMsg(msgType uint16, data []byte, conn net.C
 
 // 监听数据传输端口
 func (app *ProxyApp) serverTransConn() {
-	listenServer(":9999", app.handlerTransConn)
+	listenServer(app.config.TransConnServer, app.handlerTransConn)
 }
 
 func (app *ProxyApp) handlerTransConn(conn net.Conn) {
